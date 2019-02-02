@@ -83,13 +83,13 @@ class Nrf802154Sniffer(object):
     DLT='802.15.4'
     DLT_NO = 147 if DLT == 'user' else 230
 
-    # helper for wireshark arg and cmd parsing
+    # Helpers for wireshark arguments and command parsing.
     CTRL_ARG_CHANNEL = 0
     CTRL_ARG_LOGGER  = 6
     CTRL_CMD_SET     = 1
     CTRL_CMD_ADD     = 2
 
-    # pattern for packets being printed over serial
+    # Pattern for packets being printed over serial.
     RCV_REGEX = 'received:\s+([0-9a-fA-F]+)\s+power:\s+(-?\d+)\s+lqi:\s+(\d+)\s+time:\s+(-?\d+)'
 
     def __init__(self):
@@ -108,7 +108,7 @@ class Nrf802154Sniffer(object):
         Function responsible for stopping the sniffer firmware and closing all threads.
         """
         # Let's wait with closing afer we're sure that the sniffer started. Protects us
-        # from very short tests (NOTE: the serial_reader has a delayed started)
+        # from very short tests (NOTE: the serial_reader has a delayed started).
         while self.running.is_set() and not self.setup_done.is_set():
             time.sleep(1)
 
@@ -126,12 +126,12 @@ class Nrf802154Sniffer(object):
                         self.logger.error("Failed to stop a thread")
                         alive_threads.append(thread)
                 except RuntimeError:
-                    # TODO: This may be called from one of threads from thread list - architecture problem
+                    # TODO: This may be called from one of threads from thread list - architecture problem.
                     pass
 
             self.threads = alive_threads
         else:
-            self.logger.warning("Asked to stop {} while it was already stopped".format(self))
+            self.logger.warning("Stop command requested {} while it was already stopped".format(self))
 
     @staticmethod
     def get_hex_path():
@@ -144,10 +144,10 @@ class Nrf802154Sniffer(object):
     @staticmethod
     def extcap_interfaces():
         """
-        Wireshark-related method that returns configuration options
+        Wireshark-related method that returns configuration options.
         :return: string with wireshark-compatible information
         """
-        # TODO: Detect connected sniffers and print one interface per each sniffer
+        # TODO: Detect connected sniffers and print one interface per each sniffer.
         res = []
         res.append("extcap {version=1.0}{help=https://github.com/NordicSemiconductor/nRF-IEEE-802.15.4-radio-driver}{display=nRF 802.15.4 sniffer}")
         res.append("interface {value=nrf802154}{display=nRF 802.15.4 sniffer}")
@@ -163,7 +163,7 @@ class Nrf802154Sniffer(object):
     @staticmethod
     def extcap_dlts():
         """
-        Wireshark-related method that returns configuration options
+        Wireshark-related method that returns configuration options.
         :return: string with wireshark-compatible information
         """
         return "dlt {number=%d}{name=IEEE802_15_4_NOFCS}{display=IEEE 802.15.4 without FCS}" % Nrf802154Sniffer.DLT_NO
@@ -171,7 +171,7 @@ class Nrf802154Sniffer(object):
     @staticmethod
     def extcap_config(option):
         """
-        Wireshark-related method that returns configuration options
+        Wireshark-related method that returns configuration options.
         :return: string with wireshark-compatible information
         """
         def list_comports():
@@ -227,10 +227,10 @@ class Nrf802154Sniffer(object):
 
         if Nrf802154Sniffer.DLT == 'user':
             caplength += 6
-        pcap += struct.pack('<L', timestamp // 1000000 ) # timestamp seconds
-        pcap += struct.pack('<L', timestamp % 1000000 ) # timestamp nanoseconds
-        pcap += struct.pack('<L', caplength ) # length captured
-        pcap += struct.pack('<L', caplength ) # length in frame
+        pcap += struct.pack('<L', timestamp // 1000000 ) # Timestamp seconds
+        pcap += struct.pack('<L', timestamp % 1000000 ) # Timestamp nanoseconds
+        pcap += struct.pack('<L', caplength ) # Length captured
+        pcap += struct.pack('<L', caplength ) # Length in frame
 
         if Nrf802154Sniffer.DLT == 'user':
             pcap += struct.pack('<H', channel)
@@ -283,14 +283,14 @@ class Nrf802154Sniffer(object):
 
     def serial_write_command(self, command):
         """
-        Function responsible for reseting sniffer serial device
+        Function responsible for reseting sniffer serial device.
         """
         self.serial.write(command + b'\r\n')
         self.serial.write(b'\r\n')
 
     def serial_write(self):
         """
-        Function responsible for sending commands to serial port
+        Function responsible for sending commands to serial port.
         """
         command = self.serial_queue.get(block=True, timeout=1)
         try:
@@ -301,7 +301,7 @@ class Nrf802154Sniffer(object):
 
     def serial_writer(self):
         """
-        Thread responsible for sending commands to serial port
+        Thread responsible for sending commands to serial port.
         """
         while self.running.is_set():
             try:
@@ -309,7 +309,7 @@ class Nrf802154Sniffer(object):
             except Queue.Empty:
                 pass
 
-        # Write final commands and break out
+        # Write final commands and break out.
         while True:
             try:
                 self.serial_write()
@@ -318,7 +318,7 @@ class Nrf802154Sniffer(object):
 
     def serial_reset(self):
         """
-        Function responsible for putting sniffer device in sleep state
+        Function responsible for putting sniffer device in sleep state.
         """
         self.serial.reset_input_buffer()
         self.serial.reset_output_buffer()
@@ -343,7 +343,7 @@ class Nrf802154Sniffer(object):
                     writer_thread = threading.Thread(target=self.serial_writer, name="writer_thread")
                     writer_thread.start()
 
-                    # make sure sniffer and serial port are in idle state
+                    # Make sure sniffer and serial port are in idle state.
                     self.serial_reset()
 
                     init_cmd = []
@@ -352,7 +352,7 @@ class Nrf802154Sniffer(object):
                     for cmd in init_cmd:
                         self.serial_queue.put(cmd)
 
-                    # serial_write appends twice '\r\n' to each command, so we have to calculate that for the echo
+                    # Function serial_write appends twice '\r\n' to each command, so we have to calculate that for the echo.
                     init_res = self.serial.read(len(b"".join(c + b"\r\n\r\n" for c in init_cmd)))
 
                     if not all(cmd.decode() in init_res.decode() for cmd in init_cmd):
@@ -390,13 +390,13 @@ class Nrf802154Sniffer(object):
             except (serialutil.SerialException, serialutil.SerialTimeoutException), e:
                 self.logger.error("Cannot communicate with '{}' serial device: {} error: {}".format(self, dev, e))
 
-                # Wait a while and try again
+                # Wait a while and try again.
                 time.sleep(0.5)
             except:
                 break
 
-        self.setup_done.set()  # in case it wasn't set before
-        if self.running.is_set():  # another precaution
+        self.setup_done.set()  # In case it wasn't set before.
+        if self.running.is_set():  # Another precaution.
             self.stop_sig_handler()
 
     def fifo_writer(self, fifo, queue):
@@ -432,7 +432,7 @@ class Nrf802154Sniffer(object):
         self.dev = dev
         self.running.set()
 
-        # TODO: Add toolbar with channel selector (channel per interface?)
+        # TODO: Add toolbar with channel selector (channel per interface?).
         if control_in:
             self.threads.append(threading.Thread(target=self.control_reader, args=(control_in,)))
 
@@ -454,7 +454,7 @@ class Nrf802154Sniffer(object):
     @staticmethod
     def parse_args():
         """
-        Helper methods to make the standalone script work in console and wireshark
+        Helper methods to make the standalone script work in console and wireshark.
         """
         parser = ArgumentParser(description="Extcap program for the nRF 802.15.4 sniffer")
 
