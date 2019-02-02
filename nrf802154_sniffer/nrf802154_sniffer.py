@@ -56,6 +56,26 @@ from serial import Serial, serialutil
 from serial.tools.list_ports import comports
 
 
+class WiresharkLogHandler(logging.StreamHandler):
+    """
+    Handler used to display logging messages in extcap log window.
+    """
+
+    def __init__(self, fn_out):
+        logging.StreamHandler.__init__(self)
+        self.fn_out = fn_out
+
+        Nrf802154Sniffer.control_write(self.fn_out,
+                                Nrf802154Sniffer.CTRL_ARG_LOGGER,
+                                Nrf802154Sniffer.CTRL_CMD_SET,
+                                "")
+
+    def emit(self, record):
+        Nrf802154Sniffer.control_write(self.fn_out,
+                                       Nrf802154Sniffer.CTRL_ARG_LOGGER,
+                                       Nrf802154Sniffer.CTRL_CMD_ADD,
+                                       record.msg + "\n")
+
 class Nrf802154Sniffer(object):
 
     # Various options for pcap files: http://www.tcpdump.org/linktypes.html
@@ -63,13 +83,17 @@ class Nrf802154Sniffer(object):
     DLT='802.15.4'
     DLT_NO = 147 if DLT == 'user' else 230
 
-    # helper for wireshark arg parsing
+    # helper for wireshark arg and cmd parsing
     CTRL_ARG_CHANNEL = 0
+    CTRL_ARG_LOGGER  = 6
+    CTRL_CMD_SET     = 1
+    CTRL_CMD_ADD     = 2
 
     # pattern for packets being printed over serial
     RCV_REGEX = 'received:\s+([0-9a-fA-F]+)\s+power:\s+(-?\d+)\s+lqi:\s+(\d+)\s+time:\s+(-?\d+)'
 
     def __init__(self):
+        self.serial = None
         self.serial_queue = Queue.Queue()
         self.running = threading.Event()
         self.setup_done = threading.Event()
@@ -89,8 +113,8 @@ class Nrf802154Sniffer(object):
             time.sleep(1)
 
         if self.running.is_set():
-            self.serial_queue.put(b'')
-            self.serial_queue.put(b'sleep')
+            self.serial_reset()
+            self.serial.close()
             self.running.clear()
 
             alive_threads = []
@@ -131,6 +155,9 @@ class Nrf802154Sniffer(object):
 
         for i in range(11, 27):
             res.append("value {control=%d}{value=%d}{display=%d}" % (Nrf802154Sniffer.CTRL_ARG_CHANNEL, i, i))
+
+        res.append("control {number=%d}{type=button}{role=logger}{display=Log}{tooltip=Show capture log}" % Nrf802154Sniffer.CTRL_ARG_LOGGER)
+
         return "\n".join(res)
 
     @staticmethod
@@ -241,104 +268,136 @@ class Nrf802154Sniffer(object):
                 arg, typ, payload = Nrf802154Sniffer.control_read(fn)
             self.stop_sig_handler()
 
-    def control_writer(self, fifo, queue):
+    @staticmethod
+    def control_write(fn_out, arg, typ, payload):
         """
-        Thread responsible for sending wireshark commands (read from fifo).
-        Related to not-yet-implemented wireshark toolbar features.
+        Method used for writing wireshark command.
         """
-        with open(fifo, 'wb', 0 ) as fn:
-            while self.running.is_set():
-                time.sleep(1)
+        packet = bytearray()
+        packet += struct.pack('>sBHBB', b'T', 0, len(payload) + 2, arg, typ)
+        if sys.version_info[0] >= 3 and isinstance(payload, str):
+            packet += payload.encode('utf-8')
+        else:
+            packet += payload
+        fn_out.write(packet)
 
-    def serial_write(self, ser):
+    def serial_write_command(self, command):
+        """
+        Function responsible for reseting sniffer serial device
+        """
+        self.serial.write(command + b'\r\n')
+        self.serial.write(b'\r\n')
+
+    def serial_write(self):
         """
         Function responsible for sending commands to serial port
         """
         command = self.serial_queue.get(block=True, timeout=1)
         try:
-            ser.write(command + b'\r\n')
-            ser.write(b'\r\n')
+            self.serial_write_command(command)
         except IOError:
             self.logger.error("Cannot write to {}".format(self))
             self.running.clear()
 
-    def serial_writer(self, ser):
+    def serial_writer(self):
         """
         Thread responsible for sending commands to serial port
         """
         while self.running.is_set():
             try:
-                self.serial_write(ser)
+                self.serial_write()
             except Queue.Empty:
                 pass
 
         # Write final commands and break out
         while True:
             try:
-                self.serial_write(ser)
+                self.serial_write()
             except Queue.Empty:
                 break
+
+    def serial_reset(self):
+        """
+        Function responsible for putting sniffer device in sleep state
+        """
+        self.serial.reset_input_buffer()
+        self.serial.reset_output_buffer()
+
+        reset_cmd = []
+        reset_cmd.append(b'')
+        reset_cmd.append(b'sleep')
+
+        for cmd in reset_cmd:
+            self.serial_queue.put(cmd)
+
+        while self.serial.read():
+            pass
 
     def serial_reader(self, dev, channel, queue):
         """
         Thread responsible for reading from serial port, parsing the output and storing parsed packets into queue.
         """
-        # Wireshark needs this sleep for reset purposes
-        time.sleep(2)
-        try:
-            with Serial(dev, timeout=1) as ser:
-                ser.reset_input_buffer()
-                ser.reset_output_buffer()
+        while True:
+            try:
+                with Serial(dev, timeout=1) as self.serial:
+                    writer_thread = threading.Thread(target=self.serial_writer, name="writer_thread")
+                    writer_thread.start()
 
-                writer_thread = threading.Thread(target=self.serial_writer, args=(ser,), name="writer_thread")
-                writer_thread.start()
+                    # make sure sniffer and serial port are in idle state
+                    self.serial_reset()
 
-                buf = b''
+                    init_cmd = []
+                    init_cmd.append(b'promiscuous on')
+                    init_cmd.append(b'channel ' + bytes(str(channel).encode()))
+                    for cmd in init_cmd:
+                        self.serial_queue.put(cmd)
 
-                #TODO: Disable auto ack
-                init_cmd = []
-                init_cmd.append(b'')
-                init_cmd.append(b'promiscuous on')
-                init_cmd.append(b'channel ' + bytes(str(channel).encode()))
-                for cmd in init_cmd:
-                    self.serial_queue.put(cmd)
+                    # serial_write appends twice '\r\n' to each command, so we have to calculate that for the echo
+                    init_res = self.serial.read(len(b"".join(c + b"\r\n\r\n" for c in init_cmd)))
 
-                # serial_write appends twice '\r\n' to each command, so we have to calculate that for the echo
-                init_res = ser.read(len(b"".join(c + b"\r\n\r\n" for c in init_cmd)))
+                    if not all(cmd.decode() in init_res.decode() for cmd in init_cmd):
+                        msg = "{} did not reply properly to setup commands. Is it flashed properly? " \
+                                "Recieved: {}\n".format(self, init_res)
+                        self.logger.error(msg)
 
-                if not all(cmd.decode() in init_res.decode() for cmd in init_cmd):
-                    msg = "{} did not reply properly to setup commands. Is it flashed properly? " \
-                          "Recieved: {}\n".format(self, init_res)
-                    self.logger.error(msg)
+                    self.serial_queue.put(b'receive')
+                    self.setup_done.set()
 
-                self.serial_queue.put(b'receive')
-                self.setup_done.set()
-                while self.running.is_set():
-                    ch = ser.read()
-                    if ch != b'\n':
-                        buf += ch
-                    else:
-                        m = re.search(self.RCV_REGEX, str(buf))
-                        if m:
-                            packet = a2b_hex(m.group(1)[:-4])
-                            rssi = int(m.group(2))
-                            lqi = int(m.group(3))
-                            timestamp = int(m.group(4)) & 0xffffffff
-                            channel = int(channel)
-                            queue.put(self.pcap_packet(packet, channel, rssi, lqi, timestamp))
-                        buf = b''
+                    buf = b''
 
-                writer_thread.join()
+                    while self.running.is_set():
+                        ch = self.serial.read()
+                        if ch == b'':
+                            continue
+                        elif ch != '\n':
+                            buf += ch
+                        else:
+                            m = re.search(self.RCV_REGEX, str(buf))
+                            if m:
+                                packet = a2b_hex(m.group(1)[:-4])
+                                rssi = int(m.group(2))
+                                lqi = int(m.group(3))
+                                timestamp = int(m.group(4)) & 0xffffffff
+                                channel = int(channel)
+                                queue.put(self.pcap_packet(packet, channel, rssi, lqi, timestamp))
+                            buf = b''
 
-                # Let's clear serial link buffer after writer_thread is finished.
-                while ser.read():
-                    pass
-        except (serialutil.SerialException, serialutil.SerialTimeoutException):
-            raise RuntimeError("Cannot communicate with '{}' serial device: {}".format(self, dev))
-        finally:
-            self.setup_done.set()  # in case it wasn't set before
-            if self.running.is_set():  # another precaution
-                self.stop_sig_handler()
+                    writer_thread.join()
+
+                    # Let's clear serial link buffer after writer_thread is finished.
+                    while self.serial.read():
+                        pass
+            except (serialutil.SerialException, serialutil.SerialTimeoutException), e:
+                self.logger.error("Cannot communicate with '{}' serial device: {} error: {}".format(self, dev, e))
+
+                # Wait a while and try again
+                time.sleep(0.5)
+            except:
+                break
+
+        self.setup_done.set()  # in case it wasn't set before
+        if self.running.is_set():  # another precaution
+            self.stop_sig_handler()
 
     def fifo_writer(self, fifo, queue):
         """
@@ -376,6 +435,12 @@ class Nrf802154Sniffer(object):
         # TODO: Add toolbar with channel selector (channel per interface?)
         if control_in:
             self.threads.append(threading.Thread(target=self.control_reader, args=(control_in,)))
+
+        if control_out:
+            fn_out = open(control_out, 'wb', 0 )
+            log_handler = WiresharkLogHandler(fn_out)
+            self.logger.addHandler(log_handler)
+            self.logger.setLevel(logging.WARNING)
 
         self.threads.append(threading.Thread(target=self.serial_reader, args=(self.dev, self.channel, packet_queue), name="serial_thread"))
         self.threads.append(threading.Thread(target=self.fifo_writer, args=(fifo, packet_queue), name="fifo_thread"))
@@ -422,9 +487,8 @@ class Nrf802154Sniffer(object):
 
 
 if is_standalone:
-    args = Nrf802154Sniffer.parse_args()
 
-    logging.basicConfig(format='%(asctime)s [%(levelname)s] %(message)s', level=logging.INFO)
+    args = Nrf802154Sniffer.parse_args()
 
     sniffer_comm = Nrf802154Sniffer()
 
@@ -449,4 +513,3 @@ if is_standalone:
             sniffer_comm.extcap_capture(args.fifo, args.dev, channel, args.extcap_control_in, args.extcap_control_out)
         except KeyboardInterrupt as e:
             sniffer_comm.stop_sig_handler()
-
